@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-echo "Building CPPlayer Rust JNI backend module for arm64..."
+TARGETS=("arm64-v8a" "armeabi-v7a")
+echo "Building CPPlayer Rust JNI backend module for ${TARGETS[*]}..."
 
 # Require cargo-ndk
 if ! command -v cargo-ndk &> /dev/null; then
@@ -21,31 +22,28 @@ fi
 # Set appropriate rust flags for Android NDK
 export RUSTFLAGS="-Clink-arg=-Wl,-z,max-page-size=16384"
 
-# Compile the project for arm64-v8a with the JNI feature
+# Compile for all target architectures
 echo "Running cargo build..."
-cargo ndk -t arm64-v8a -o ./target/jniLibs build --release --features jni
+cargo ndk -t arm64-v8a -t armeabi-v7a -o ./target/jniLibs build --release --features jni
 
-# Check if the .so was generated
-# The library name might depend on your Cargo.toml, usually libncm_api_rs.so or similar.
-# We will just find the built .so in the output directory.
-SO_FILE=$(find ./target/jniLibs/arm64-v8a -name "*.so" | head -n 1)
-
-if [ -z "$SO_FILE" ] || [ ! -f "$SO_FILE" ]; then
-    echo "Error: Could not find compiled .so file in ./target/jniLibs/arm64-v8a"
-    exit 1
-fi
-
-echo "Found library: $SO_FILE"
-
-# Prepare packaging directory
+# Prepare packaging directory (multi-arch layout)
 MODULE_DIR="./target/cp_module"
 rm -rf "$MODULE_DIR"
-mkdir -p "$MODULE_DIR"
 
-# Copy the .so file
-cp "$SO_FILE" "$MODULE_DIR/libcp_api.so"
+for ABI in "${TARGETS[@]}"; do
+    SO_FILE=$(find "./target/jniLibs/$ABI" -name "*.so" | head -n 1)
 
-# Create manifest.json
+    if [ -z "$SO_FILE" ] || [ ! -f "$SO_FILE" ]; then
+        echo "Error: Could not find compiled .so file in ./target/jniLibs/$ABI"
+        exit 1
+    fi
+
+    echo "Found library for $ABI: $SO_FILE"
+    mkdir -p "$MODULE_DIR/lib/$ABI"
+    cp "$SO_FILE" "$MODULE_DIR/lib/$ABI/libcp_api.so"
+done
+
+# Create manifest.json (multi-arch)
 cat <<EOF > "$MODULE_DIR/manifest.json"
 {
   "id": "cp.provider.rust.default",
@@ -53,15 +51,31 @@ cat <<EOF > "$MODULE_DIR/manifest.json"
   "version": "1.0.0",
   "type": "jni",
   "entryPoint": "libcp_api.so",
+  "supportedAbis": ["arm64-v8a", "armeabi-v7a"],
   "apiMap": {}
 }
 EOF
 
-# Zip the module
+# Zip the module using Python (no zip command needed)
 echo "Packaging module to ./target/cp_rust_provider.zip..."
-cd "$MODULE_DIR"
-zip -r ../cp_rust_provider.zip ./*
-cd ../..
+python3 -c "
+import zipfile, os
+module_dir = '$MODULE_DIR'
+zip_path = './target/cp_rust_provider.zip'
+with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+    for root, dirs, files in os.walk(module_dir):
+        for f in files:
+            full = os.path.join(root, f)
+            arcname = os.path.relpath(full, module_dir)
+            zf.write(full, arcname)
+"
 
 echo "✅ Module built successfully: ./target/cp_rust_provider.zip"
+echo "Contents:"
+python3 -c "
+import zipfile
+with zipfile.ZipFile('./target/cp_rust_provider.zip', 'r') as zf:
+    zf.printdir()
+"
+echo ""
 echo "You can now import this .zip file directly into the CPPlayer App."
